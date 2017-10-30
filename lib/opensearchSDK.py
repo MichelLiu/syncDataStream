@@ -11,32 +11,16 @@ from bson import json_util
 from pymongo import MongoClient
 
 class V3Api:
-    def __init__(self,cfg, envType):
+    def __init__(self,cfg):
         self.VERB = "POST"
         self.URI_PREFIX = '/v3/openapi/apps/'
         self.OS_PREFIX = 'OPENSEARCH'
-        confkey = envType + "-Base"
-        Opkey = envType + "-Optional"
-        required_ops = [("Sandbox-Base", "AccessKeyId"), ("Sandbox-Base", "AccessKeySecret"),("Sandbox-Base","AppName"),
-                        ("Sandbox-Base", "Endpoint"), ("Sandbox-Base", "MongoDB"),
-                        ("Online-Base", "AccessKeyId"),("Online-Base", "AccessKeySecret"), ("Online-Base","AppName"),
-                        ("Online-Base", "Endpoint"), ("Online-Base", "MongoDB")]
 
-        parser = ConfigParser.ConfigParser()
-        parser.read(cfg)
-        for sec, op in required_ops:
-            if not parser.has_option(sec, op):
-                sys.stderr.write("ERROR: need (%s, %s) in %s.\n" % (sec, op, cfg))
-                sys.stderr.write("Read README to get help inforamtion.\n")
-                sys.exit(1)
-
-        self.app_name = parser.get(confkey, "AppName")
-        self.mongoConnection = parser.get(confkey, "MongoDB")
-        self.mongoClient = MongoClient(self.mongoConnection)
-        self.address = parser.get(confkey, "Endpoint")
+        self.app_name = cfg["appName"]
+        self.address = cfg["endPoint"]
         self.port = 80
-        self.AccessKeyID = parser.get(confkey,"AccessKeyId")
-        self.AccessKeySecret = parser.get(confkey, "AccessKeySecret")
+        self.AccessKeyID = cfg["accessKeyId"]
+        self.AccessKeySecret = cfg["accessKeySecret"]
 
     def runPost(self,
                  table_name = None,
@@ -51,11 +35,26 @@ class V3Api:
                                         http_header = http_header,
                                         http_params = http_params)
 
-        conn = httplib.HTTPConnection(self.address, self.port)
-        conn.request(self.VERB, url = query, body = body_json.encode('utf-8'), headers = header)
-        response = conn.getresponse()
 
-        return response.status, response.getheaders(), response.read()
+        flag = True
+        cnt = 0
+        while flag and cnt < 10:
+            try:
+                conn = httplib.HTTPConnection(self.address, self.port)
+                conn.request(self.VERB, url = query, body = body_json.encode('utf-8'), headers = header)
+                response = conn.getresponse()
+                if response.status == 200:
+                    flag = False
+                    break
+                else:
+                    print response.status, response.getheaders(), response.read()
+            finally:
+                time.sleep(1)
+                cnt += 1
+
+        if cnt >= 10:
+            return False
+        return True
 
     def buildQuery(self,
                    app_name = None,
@@ -87,7 +86,7 @@ class V3Api:
                       + self.__canonicalizedHeaders(request_header) \
                       + self.__canonicalizedResource(uri, http_params)
 
-        h = hmac.new(secret, canonicalized, sha1)
+        h = hmac.new(bytearray(secret, 'utf-8'),bytearray(canonicalized, 'utf-8'), sha1)
         signature = base64.encodestring(h.digest()).strip()
         return '%s %s%s%s' %(self.OS_PREFIX, access_key, ':', signature)
 

@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 # coding=utf8
-# author = wei.liu@gemdata.net
+# MichelLiu
 import getopt
 import os
 import sys
 from bson import json_util
+from lib.metaData import config_parser
+import ConfigParser
+from configdb.configdb import initDB
 
 reload(sys)
 sys.setdefaultencoding('utf8')
@@ -18,7 +21,7 @@ def main(argv):
     envType = None
 
     try:
-        opts, args = getopt.getopt(argv, "h:j:e:", ["help=", "config=", "envType="])
+        opts, args = getopt.getopt(argv, "h:j:e:", ["help=", "jobname=", "envType="])
     except getopt.GetoptError:
         print 'main.py -j <job name> -e <enviroment (Sandbox or Online)>'
         sys.exit(2)
@@ -29,11 +32,11 @@ def main(argv):
                     usage: main.py -j <job name> -e <enviroment (Sandbox or Online)>
                     Options and arguments:
                         -h | --help       帮助命令
-                        -j | --config     配置文件的路径
+                        -j | --jobname     配置文件的路径
                         -e | --envType   环境 Sandbox 表示测试环境 Online 表示线上环境
                     '''
             sys.exit()
-        elif opt in ["-j", "--job"]:
+        elif opt in ["-j", "--jobname"]:
             jobName = arg
         elif opt in ["-e", "--envType"]:
             envType = arg
@@ -42,26 +45,17 @@ def main(argv):
         print 'main.py -j <job name> -e <enviroment (Sandbox or Online)>'
         sys.exit(2)
 
-    configPath = os.path.dirname(os.path.abspath(__file__)) + "/config/" + jobName + "/" + envType + ".json"
-    configContent = None
-    if os.path.exists(configPath):
-        fdata = open(configPath, 'rb')
-        try:
-            jsonStr = fdata.read()
-            configContent = json_util.loads(jsonStr)
-        except:
-            print "config not exists or config format error"
-            fdata.close()
+    dbcfg = initDB(envType)
 
-    if None == configContent:
+    configPasor = config_parser(jobName,dbcfg)
+    configInfo = configPasor.getConfigInfo()
+
+    if None == configInfo:
         print "config not exists or config format error"
         sys.exit(2)
 
-    logPath = os.path.dirname(os.path.abspath(__file__)) + "/log/" + jobName + "/" + envType
-    for index,configInfo in enumerate(configContent):
-        obj = dataTransfer(configInfo,logPath,jobName)
-        obj.setOccurs(10)
-        obj.run()
+    obj = dataTransfer(configInfo,configPasor,jobName)
+    obj.run()
 
 if __name__ == '__main__':
     main(sys.argv[1:])

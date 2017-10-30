@@ -1,11 +1,16 @@
 #!/usr/bin/env python
 # coding=utf8
-# author = wei.liu@gemdata.net
+# MichelLiu
 
 import os
 import sys
+
+import time
+
+import datetime
 from pymongo import MongoClient
 import MySQLdb
+from DBUtils.PooledDB import PooledDB
 from bson import json_util
 from bson.objectid import ObjectId
 import pinyin
@@ -20,26 +25,50 @@ from lib.opensearchSDK import V3Api
 from dataformat.dataFormat import DataFormat
 
 class dataTransfer(ThreadPool):
-    def __init__(self,configContent,logPath,jobName):
+    def __init__(self,configContent,configPasor,jobName):
         self.configContent = configContent
         self.source = self.configContent["source"]
         self.target = self.configContent["target"]
         self.mongoClients = {"source":{},"target":{}}
         self.sqlserverClients = {"source":{},"target":{}}
         self.mysqlClients = {"source":{},"target":{}}
-        ThreadPool.__init__(self,occurs = self.configContent["occurs"])
-        self.logPath = logPath + "/" + self.source["connection"]["collection"]
-        if os.path.exists(self.logPath) == False:
-            os.makedirs(self.logPath)
+        self.opensearchClients = {"source":{},"target":{}}
+        if int(self.configContent["upsert"]) == 1:
+            self.upsert = True
+        else:
+            self.upsert = False
+        self.fieldMap = {}
+        for k,v in enumerate(self.configContent["fieldMap"]):
+            self.fieldMap[v["sourceField"]] = v["targetFields"]
+        self.jobName = jobName
+        ThreadPool.__init__(self,occurs = int(self.configContent["occurs"]))
+        self.configPasor = configPasor
         self.docFormator = DataFormat(self.source["dbtype"],self.target["dbtype"],jobName)
+        self.flagStart = False
 
-    def customize_variable(self,startpos):
+    def customize_variable(self,startpos,endpos=None):
+        threadid = self.jobName + "_" + str(self.occurs) + "_" + str(startpos)
+        info = self.configPasor.findProgress(threadid)
+        item = None
+        if None == info:
+            item = {
+                "threadid": threadid,
+                "status":0,
+                "position": str(startpos) + "," + str(endpos),
+                "finished": 0
+            }
+            self.flagStart = True
+
         if self.source["dbtype"] == 'mongo':
-            self.mongoClients["source"][str(startpos)]=MongoClient(self.source["connection"]["connectString"])[self.source["connection"]["db"]][self.source["connection"]["collection"]]
+            self.mongoClients["source"][str(threadid)]=MongoClient(self.source["connection"]["connectString"])[self.source["connection"]["db"]][self.source["connection"]["collection"]]
+            if None != item:
+                item["total"] = self.mongoClients["source"][str(threadid)].count({"_id":{"$gte":ObjectId(str(startpos)),"$lt":ObjectId(str(endpos))}})
         if self.target["dbtype"] == 'mongo':
-            self.mongoClients["target"][str(startpos)]=MongoClient(self.target["connection"]["connectString"])[self.target["connection"]["db"]][self.target["connection"]["collection"]]
-        if self.target["dbtype"] == 'mysql':
-            self.mysqlClients["target"][str(startpos)]=MySQLdb.connect(host=self.target["connection"]["host"],user=self.target["connection"]["user"],passwd=self.target["connection"]["passwd"],db=self.target["connection"]["db"],charset=self.target["connection"]["charset"])
+            self.mongoClients["target"][str(threadid)]=MongoClient(self.target["connection"]["connectString"])[self.target["connection"]["db"]]
+        if self.target["dbtype"] == 'opensearch':
+            self.opensearchClients["target"][str(threadid)] = V3Api(self.target["connection"])
+
+        self.configPasor.addProgress(item)
 
     def __close_connection(self,startpos):
         for k,v in self.mongoClients.items():
@@ -62,70 +91,240 @@ class dataTransfer(ThreadPool):
         else:
             return 0
 
-    def getCursor(self,startpos):
-        if self.mongoClients["source"].has_key(str(startpos)):
+    def getCursor(self,threadId,startpos):
+        if self.source["dbtype"] == 'mongo':
             projection = {}
-            for k,v in self.configContent["fieldMap"].items():
+            for k,v in self.fieldMap.items():
                 projection[k] = 1
-            return self.mongoClients["source"][str(startpos)].find(self.source["query"],projection).skip(startpos)
-        elif self.source.has_key('sqlserver'):
+            print threadId,startpos
+            tmpQuery = json_util.loads(self.source["query"])
+            if self.flagStart:
+                tmpQuery["_id"] = {"$gte":ObjectId(startpos)}
+            else:
+                tmpQuery["_id"] = {"$gt": ObjectId(startpos)}
+            return self.mongoClients["source"][str(threadId)].find(tmpQuery,projection).sort("_id")
+        elif self.source["dbtype"] ==  'sqlserver':
             return 0
-        elif self.source.has_key('mysql'):
+        elif self.source["dbtype"] ==  'mysql':
             return 0
         else:
             return 0
 
+    def docMapTabelRecord(self,offset):
+        if self.source["dbtype"] == "mysql" or self.target["dbtype"] == "mysql":
+            self.mysqlpool = PooledDB(MySQLdb, self.occurs, host=self.target["connection"]["host"],
+                                      user=self.target["connection"]["user"],
+                                      passwd=self.target["connection"]["passwd"], db=self.target["connection"]["db"],
+                                      charset=self.target["connection"]["charset"])
+
+        if self.source["dbtype"] == "mongo":
+            tmpClient = MongoClient(self.source["connection"]["connectString"])
+            firstDoc = tmpClient[self.source["connection"]["db"]][self.source["connection"]["collection"]].find_one()
+            startTimeStamp = int(round(time.mktime(firstDoc["_id"].generation_time.timetuple())))
+            tmp = datetime.datetime.now()
+            endTimeStamp = int(round(time.mktime(datetime.datetime(year=tmp.year,month=tmp.month,day=28).timetuple())))
+            tmpClient.close()
+            pageTime = int(round((endTimeStamp - startTimeStamp) / self.occurs))
+            docMap = []
+            for i in range(0,self.occurs):
+                skippos = hex(i*pageTime+startTimeStamp)[2:] + "0000000000000000"
+                endpos = hex((i+1) * pageTime + startTimeStamp)[2:] + "0000000000000000"
+                docMap.append((None, {'startpos': skippos,"endpos":endpos}))
+                self.customize_variable(skippos,endpos)
+            print docMap
+            return docMap
+
+        docCnt = self.getDocCnt()
+        if docCnt <= self.occurs:
+            self.pageSize = docCnt
+        else:
+            self.pageSize = int(round(docCnt / self.occurs))
+        docMap = []
+        for step in range(0, int(round(docCnt / self.pageSize))):
+            skippos = step * self.pageSize + offset
+            endpos = skippos + self.pageSize
+            docMap.append((None, {'startpos': skippos,'endpos': endpos}))
+            self.customize_variable(skippos,endpos)
+
+        print "docMap:", docMap
+        return docMap
+
+    def __cleanNone(self,fields):
+        for key,value in fields.items():
+            if value == None:
+                del fields[key]
+        return fields
+
     def update(self,document,startpos):
-        item = self.docFormator.format(self.configContent["fieldMap"],document)
+        threadid = self.jobName + "_" + str(self.occurs) + "_" + str(startpos)
+        item,primary = self.docFormator.format(self.fieldMap,document)
         if item == None:
             return
         if self.target["dbtype"] == 'mongo':
-            ret = self.mongoClients["target"][str(startpos)].update({'_id': document["_id"]}, {"$set": item},self.configContent["upsert"],True)
-            print ret["updatedExisting"],item
+            for collection,info in item.items():
+                where = {}
+                for key,value in primary.items():
+                    where[key]=info[key]
+                ret = self.mongoClients["target"][str(threadid)][collection].update(where, {"$set": info},self.upsert,True)
         elif self.target["dbtype"] == 'mysql':
-            keys = self.configContent["fieldMap"].keys()
-            targetKeys = []
-            targetKeysType = {}
-            for index,keyv in enumerate(keys):
-                targetKeys.append(self.configContent["fieldMap"][keyv]["targetField"])
-            sql = "INSERT IGNORE INTO " + self.target["connection"]["db"] + "." + self.target["connection"][
-                "collection"] + \
-                  " (`" + "`,`".join(targetKeys) + "`) VALUES ("
-            for index, keyv in enumerate(keys):
-                if type(item[keyv]) is str or type(item[keyv]) is unicode:
-                    sql += '"%s",' % item[keyv]
+            keys = []
+            for index,keyv in enumerate(self.configContent["fieldMap"]):
+                for m,n in enumerate(keyv["targetFields"]):
+                    keys.append(n["field"])
+            for tableName,info in item.items():
+                sql = ''
+                if self.upsert:
+                    sql = "INSERT INTO " + self.target["connection"]["db"] + "." + tableName + \
+                          " (`" + "`,`".join(keys) + "`) VALUES ("
+                    for index, keyv in enumerate(keys):
+                        if type(info[keyv]) is str or type(info[keyv]) is unicode:
+                            sql += '"%s",' % info[keyv]
+                        else:
+                            sql += '%s,' % info[keyv]
+                    sql = sql[:-1] + ")"
                 else:
-                    sql += '%s,' % item[keyv]
-            sql = sql[:-1] + ")"
-            print sql
-            cursor = self.mysqlClients["target"][str(startpos)].cursor()
-            cursor.execute(sql)
-            self.mysqlClients["target"][str(startpos)].commit()
-            cursor.close()
+                    sql = "UPDATE " + self.target["connection"]["db"] + "." + tableName + \
+                          " SET "
+                    for index, keyv in enumerate(keys):
+                        if type(info[keyv]) is str or type(info[keyv]) is unicode:
+                            sql += keyv
+                            sql += '="%s",' % info[keyv]
+                        else:
+                            sql += keyv
+                            sql += '%s,' % info[keyv]
+                    sql = sql[:-1] + " WHERE "
+                    for keyv,v in primary.items():
+                        if type(info[keyv]) is str or type(info[keyv]) is unicode:
+                            sql += keyv
+                            sql += '="%s",' % info[keyv]
+                        else:
+                            sql += keyv
+                            sql += '%s,' % info[keyv]
+                    sql = sql[:-1]
+                try:
+                    conn = self.mysqlpool.connection()
+                    cursor = conn.cursor()
+                    cursor.execute(sql)
+                    conn.commit()
+                except:
+                    print "error", sql
+                finally:
+                    cursor.close()
+                    conn.close()
+                    return
+        elif self.target["dbtype"] == 'opensearch':
+            for tabName,data in item.items():
+                postData = []
+                for k,fields in enumerate(data):
+                    fields = self.__cleanNone(fields)
+                    if len(fields) > 0:
+                        tmp = {
+                            "cmd":"add",
+                            'timestamp': int(round(time.time() * 1000)),
+                            'fields': fields
+                        }
+                        postData.append(tmp)
+                flag = self.opensearchClients["target"][str(threadid)].runPost(table_name=tabName, body_json = json_util.dumps(postData, ensure_ascii=False))
+                if flag == False:
+                    print flag,startpos,tabName,json_util.dumps(data, ensure_ascii=False)
 
 
-    def callback(self,startpos):
+    def callback(self,startpos,endpos):
         oriStartPos = startpos
-        tmpFile = self.logPath + "/" + str(self.occurs) + "_" + str(startpos) + ".txt"
-        if os.path.exists(tmpFile):
-            logFile = open(tmpFile, "r")
-            startpos = int(logFile.read())
-            logFile.close()
+        flagMongo = False
+        if self.source["dbtype"] == "mongo":
+            flagMongo = True
+        threadid = self.jobName + "_" + str(self.occurs) + "_" + str(startpos)
+        info = self.configPasor.findProgress(threadid)
+        finished = int(info["finished"])
+        position = []
+        if type(info) is dict and info.has_key('position'):
+            position = info["position"].split(',')
+            if flagMongo:
+                startpos = ObjectId(position[0])
+            else:
+                startpos = int(position[0])
+        if len(position) <= 0:
+            position.append(str(startpos))
+            position.append(str(endpos))
 
-        cursor = self.getCursor(startpos)
+
+        cursor = self.getCursor(threadid,startpos)
         cursor.batch_size(1000)
         cnt = 0
+        bulk = None
+        if self.target["dbtype"] == 'opensearch':
+            bulk = []
         for document in cursor:
-            retFlag = self.update(document,oriStartPos)
-            cnt += 1
-            if cnt > 10000:
-                tmplog = open(tmpFile, "wb")
-                startpos += cnt
-                tmplog.write(str(startpos))
-                tmplog.flush()
-                tmplog.close()
-                cnt = 0
-            if startpos > oriStartPos + self.pageSize:
-                break
+            finished += 1
+            if bulk == None:
+                retFlag = self.update(document,oriStartPos)
+            else:
+                bulk.append(document)
+                if len(bulk) == 500:
+                    self.update(bulk, oriStartPos)
+                    bulk = []
+            if flagMongo:
+                cnt += 1
+                position[0] = str(document["_id"])
+                if cnt > 10000:
+                    item = {
+                        "threadid": threadid,
+                        "status": 1,
+                        "end_time": 0,
+                        "position": ",".join(position),
+                        "finished": finished
+                    }
+                    self.configPasor.updateProgress(item)
+                    cnt = 0
+                if document["_id"] > ObjectId(endpos):
+                    item = {
+                        "threadid": threadid,
+                        "status": 2,
+                        "end_time": int(round(time.time())),
+                        "position": ",".join(position),
+                        "finished": finished
+                    }
+                    self.configPasor.updateProgress(item)
+                    cnt = 0
+                    break
+            else:
+                cnt += 1
+                position[0] = str(startpos)
+                if cnt > 10000:
+                    startpos += cnt
+                    item = {
+                        "threadid": threadid,
+                        "status": 1,
+                        "end_time": 0,
+                        "position": ",".join(position),
+                        "finished": finished
+                    }
+                    self.configPasor.updateProgress(item)
+                    cnt = 0
+
+                if startpos > oriStartPos + self.pageSize:
+                    item = {
+                        "threadid": threadid,
+                        "status": 2,
+                        "end_time": int(round(time.time())),
+                        "position": ",".join(position),
+                        "finished": finished
+                    }
+                    self.configPasor.updateProgress(item)
+                    cnt = 0
+                    break
+        if type(bulk) is list and len(bulk) > 0:
+            self.update(bulk,oriStartPos)
+
+        item = {
+            "threadid": threadid,
+            "status": 2,
+            "end_time": int(round(time.time())),
+            "position": ",".join(position),
+            "finished": finished
+        }
+        self.configPasor.updateProgress(item)
+        self.configPasor.updateRunInfo('', -1,2)
         cursor.close()
         self.__close_connection(oriStartPos)

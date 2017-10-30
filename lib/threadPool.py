@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf8
-# author = wei.liu@gemdata.net
+# MichelLiu
 
 import os
 import sys
@@ -29,7 +29,7 @@ class ThreadPool:
     def getDocCnt(self):
         pass
 
-    def callback(self,startpos):
+    def callback(self,startpos,endpos):
         pass
 
     def docMapTabelRecord(self,offset):
