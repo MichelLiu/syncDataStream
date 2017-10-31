@@ -62,7 +62,10 @@ class dataTransfer(ThreadPool):
         if self.source["dbtype"] == 'mongo':
             self.mongoClients["source"][str(threadid)]=MongoClient(self.source["connection"]["connectString"])[self.source["connection"]["db"]][self.source["connection"]["collection"]]
             if None != item:
-                item["total"] = self.mongoClients["source"][str(threadid)].count({"_id":{"$gte":ObjectId(str(startpos)),"$lt":ObjectId(str(endpos))}})
+                tmpQuery = json_util.loads(self.source["query"])
+                if len(tmpQuery) == 0:
+                    tmpQuery["_id"] = {"$gte":ObjectId(str(startpos)),"$lt":ObjectId(str(endpos))}
+                item["total"] = self.mongoClients["source"][str(threadid)].count(tmpQuery)
         if self.target["dbtype"] == 'mongo':
             self.mongoClients["target"][str(threadid)]=MongoClient(self.target["connection"]["connectString"])[self.target["connection"]["db"]]
         if self.target["dbtype"] == 'opensearch':
