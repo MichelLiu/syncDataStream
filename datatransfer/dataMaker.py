@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf8
-# author = wei.liu@gemdata.net
+# author = MichelLiu
 
 import os
 import sys
