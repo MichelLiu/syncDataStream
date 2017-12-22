@@ -8,18 +8,6 @@ from lib.opensearchSDK import V3Api
 
 class mnsManage:
     def __init__(self,envType,queueName):
-        if envType == 'sandbox':
-            self.endpoint = 'http://1279803556513102.mns.cn-shanghai.aliyuncs.com'
-            self.accessKeyId = 'LTAIbfMuzAus18OZ'
-            self.accessKeySecret = 'xMcjZWCVV8vd4aVtYfhZIATHiXaR6m'
-        elif envType == 'online':
-            self.endpoint = 'http://1208194248621639.mns.cn-shanghai.aliyuncs.com'
-            self.accessKeyId = 'LTAIgp2nq3ktgJCu'
-            self.accessKeySecret = 'ySr0wleSeg7ZWEl40JxVs4dCnnObTV'
-        else:
-            print "error envType; only support sandbox or online"
-            sys.exit(2)
-
         my_account = Account(self.endpoint, self.accessKeyId, self.accessKeySecret, '')
         self.queue = my_account.get_queue(queueName)
 
